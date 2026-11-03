@@ -87,7 +87,7 @@ class CameraFragment : Fragment() {
     private var arTracking = false
     private var cameraStreaming = false
 
-    private var currentModelFile = "neutrofilo.glb"
+    private var currentModelFile = "lumine.glb"
 
     private lateinit var sharedViewModel: SharedModelViewModel
 
@@ -209,10 +209,6 @@ class CameraFragment : Fragment() {
         placeButton?.bringToFront()
     }
 
-    /**
-     * Identificação por características comuns de emuladores.
-     * Por escolha deste aplicativo, eles iniciam sem ARCore.
-     */
     private fun isEmulator(): Boolean {
         return Build.FINGERPRINT.startsWith("generic") ||
                 Build.FINGERPRINT.startsWith("unknown") ||
@@ -265,11 +261,9 @@ class CameraFragment : Fragment() {
                             availabilityJob?.cancel()
                             availabilityJob = null
 
-                            val installed =
-                                availability ==
-                                        ArCoreApk.Availability.SUPPORTED_INSTALLED
-
-                            requestMode(useAr = installed)
+                            // ALTERAÇÃO:
+                            // Sempre utiliza a câmera sem exigir ARCore.
+                            requestMode(useAr = false)
                         }
                     }
                 }
@@ -407,11 +401,6 @@ class CameraFragment : Fragment() {
         }
     }
 
-    /**
-     * Troca automaticamente quando o ARCore não consegue rastrear.
-     * Conta somente o tempo em que a tela está em primeiro plano.
-     * A ausência de uma superfície, sozinha, não provoca a troca.
-     */
     private fun startArWatchdog(expected: Int) {
         arWatchdogJob?.cancel()
 
@@ -514,7 +503,6 @@ class CameraFragment : Fragment() {
         val expected = generation
         val owner = viewLifecycleOwner
 
-        // O prazo também cobre a obtenção do CameraProvider.
         startCameraWatchdog(expected)
 
         try {
@@ -683,6 +671,8 @@ class CameraFragment : Fragment() {
                 if (!isAr) {
                     scene.addChildNode(node)
                     placeButton?.isEnabled = true
+                    statusText?.text =
+                        "Modelo carregado na visualização da câmera."
                 }
 
             } catch (e: CancellationException) {

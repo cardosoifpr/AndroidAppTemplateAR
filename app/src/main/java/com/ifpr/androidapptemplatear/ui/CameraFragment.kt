@@ -1,743 +1,855 @@
 package com.ifpr.androidapptemplatear.ui
 
-import android.content.Context
+import android.Manifest
 import android.content.pm.PackageManager
-import android.media.MediaPlayer
+import android.graphics.Color
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
+import android.os.SystemClock
+import android.view.Gravity
 import android.view.LayoutInflater
-import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
-import android.widget.Toast
-
-import androidx.core.app.ActivityCompat
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.TextView
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelProvider
-
+import androidx.lifecycle.lifecycleScope
 import com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
+import com.google.ar.core.ArCoreApk
 import com.google.ar.core.Config
+import com.google.ar.core.HitResult
+import com.google.ar.core.Plane
+import com.google.ar.core.TrackingState
 import com.ifpr.androidapptemplatear.R
-import com.ifpr.androidapptemplatear.databinding.FragmentCameraBinding
-
-import io.github.sceneview.ar.ArSceneView
-import io.github.sceneview.ar.node.ArModelNode
-import io.github.sceneview.ar.node.PlacementMode
+import io.github.sceneview.SceneView
+import io.github.sceneview.ar.ARSceneView
+import io.github.sceneview.ar.node.AnchorNode
 import io.github.sceneview.math.Position
-
-import okio.IOException
+import io.github.sceneview.node.ModelNode
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import java.io.File
-import kotlin.math.abs
-import kotlin.math.atan2
-import kotlin.math.sqrt
-
 
 class CameraFragment : Fragment() {
 
-    // ============================================================
-    // VIEWS
-    // ============================================================
+    private enum class Mode {
+        CHECKING,
+        AR,
+        CAMERA,
+        STATIC
+    }
 
-    private lateinit var sceneView: ArSceneView
-    private lateinit var modelNode: ArModelNode
-    private lateinit var placeButton: ExtendedFloatingActionButton
+    companion object {
+        private const val AVAILABILITY_TIMEOUT_MS = 4000L
+        private const val AR_TIMEOUT_MS = 15000L
+        private const val CAMERA_TIMEOUT_MS = 8000L
+    }
+
+    private var mode = Mode.CHECKING
+
+    private var container: FrameLayout? = null
+    private var placeButton: ExtendedFloatingActionButton? = null
+    private var statusText: TextView? = null
+    private var overlay: View? = null
+
+    private var sceneView: SceneView? = null
+    private var arView: ARSceneView? = null
+
+    private var modelNode: ModelNode? = null
+    private var anchorNode: AnchorNode? = null
+    private var placementHit: HitResult? = null
+
+    private var cameraProvider: ProcessCameraProvider? = null
+    private var cameraPreview: Preview? = null
+
+    private var loadJob: Job? = null
+    private var availabilityJob: Job? = null
+    private var arWatchdogJob: Job? = null
+    private var cameraWatchdogJob: Job? = null
+
+    private var generation = 0
+    private var modelGeneration = 0
+    private var pendingAr = false
+
+    private var arTracking = false
+    private var cameraStreaming = false
+
+    private var currentModelFile = "neutrofilo.glb"
 
     private lateinit var sharedViewModel: SharedModelViewModel
 
-
-    // ============================================================
-    // CAMERA
-    // ============================================================
-
-    private val CAMERA_PERMISSION_CODE = 1001
-
-
-    // ============================================================
-    // MODELO
-    // ============================================================
-
-    private var currentModelFile =
-        "old_man_walk_cycle.glb"
-
-
-    // ============================================================
-    // BINDING
-    // ============================================================
-
-    private var _binding: FragmentCameraBinding? = null
-
-    private val binding
-        get() = _binding!!
-
-
-    // ============================================================
-    // JOYSTICK
-    // ============================================================
-
-    private var joystickX = 0f
-    private var joystickY = 0f
-
-    private var targetX = 0f
-    private var targetY = 0f
-
-    private var joystickPressed = false
-
-
-    // ============================================================
-    // MOVIMENTO
-    // ============================================================
-
-    private val speed = 0.006f
-
-    private val smoothness = 0.20f
-
-    private val rotationSmoothness = 0.15f
-
-
-    // ============================================================
-    // LOOP
-    // ============================================================
-
-    private val handler =
-        Handler(Looper.getMainLooper())
-
-
-    private val movementLoop =
-        object : Runnable {
-
-            override fun run() {
-
-                moveCharacter()
-
-                handler.postDelayed(
-                    this,
-                    16L
-                )
+    private val permissionLauncher =
+        registerForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { granted ->
+            if (container != null) {
+                when {
+                    !granted -> startPreview(useCamera = false)
+                    pendingAr -> startAr()
+                    else -> startPreview(useCamera = true)
+                }
             }
         }
 
-
-    // ============================================================
-    // ON CREATE VIEW
-    // ============================================================
-
     override fun onCreateView(
         inflater: LayoutInflater,
-        container: ViewGroup?,
+        parent: ViewGroup?,
         savedInstanceState: Bundle?
     ): View {
+        return inflater.inflate(
+            R.layout.fragment_camera,
+            parent,
+            false
+        )
+    }
 
-        _binding =
-            FragmentCameraBinding.inflate(
-                inflater,
-                container,
-                false
-            )
+    override fun onViewCreated(
+        view: View,
+        savedInstanceState: Bundle?
+    ) {
+        super.onViewCreated(view, savedInstanceState)
 
+        container = view.findViewById(R.id.sceneContainer)
+        placeButton = view.findViewById(R.id.place)
 
-        // ========================================================
-        // VIEW MODEL
-        // ========================================================
+        createControls()
 
         sharedViewModel =
             ViewModelProvider(requireActivity())[
                 SharedModelViewModel::class.java
             ]
 
+        val selectedModel = sharedViewModel.selectedModel.value
 
-        // ========================================================
-        // MODELO SELECIONADO
-        // ========================================================
-
-        sharedViewModel.selectedModel.observe(
-            viewLifecycleOwner
-        ) { path ->
-
-            currentModelFile = path
-
-            loadModel(path)
+        if (!selectedModel.isNullOrBlank()) {
+            currentModelFile = selectedModel
+        } else {
+            sharedViewModel.selectModel(currentModelFile)
         }
 
+        sharedViewModel.selectedModel.observe(viewLifecycleOwner) { path ->
+            if (!path.isNullOrBlank() && path != currentModelFile) {
+                currentModelFile = path
+                loadModel()
+            }
+        }
 
-        // ========================================================
-        // SCENE VIEW
-        // ========================================================
+        placeButton?.setOnClickListener {
+            when (mode) {
+                Mode.AR -> placeModel()
 
-        sceneView =
-            binding.sceneView.apply {
+                Mode.CAMERA,
+                Mode.STATIC -> {
+                    startPreview(useCamera = mode == Mode.CAMERA)
+                }
 
-                lightEstimationMode =
+                Mode.CHECKING -> Unit
+            }
+        }
+
+        checkAvailability()
+    }
+
+    private fun createControls() {
+        val parent = container?.parent as? ViewGroup ?: return
+
+        val layer = FrameLayout(requireContext())
+
+        val panel = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            setBackgroundColor(Color.argb(190, 25, 30, 35))
+        }
+
+        statusText = TextView(requireContext()).apply {
+            text = "Preparando visualização…"
+            textSize = 13f
+            setTextColor(Color.WHITE)
+        }
+
+        panel.addView(statusText)
+
+        layer.addView(
+            panel,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM
+            ).apply {
+                leftMargin = dp(12)
+                rightMargin = dp(12)
+                bottomMargin = dp(85)
+            }
+        )
+
+        parent.addView(
+            layer,
+            ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        overlay = layer
+
+        parent.findViewById<View>(R.id.titleImage)?.bringToFront()
+        placeButton?.bringToFront()
+    }
+
+    /**
+     * Identificação por características comuns de emuladores.
+     * Por escolha deste aplicativo, eles iniciam sem ARCore.
+     */
+    private fun isEmulator(): Boolean {
+        return Build.FINGERPRINT.startsWith("generic") ||
+                Build.FINGERPRINT.startsWith("unknown") ||
+                Build.MODEL.contains("google_sdk", ignoreCase = true) ||
+                Build.MODEL.contains("Emulator", ignoreCase = true) ||
+                Build.MODEL.contains(
+                    "Android SDK built for",
+                    ignoreCase = true
+                ) ||
+                Build.PRODUCT.contains("sdk", ignoreCase = true) ||
+                Build.HARDWARE.contains("goldfish", ignoreCase = true) ||
+                Build.HARDWARE.contains("ranchu", ignoreCase = true)
+    }
+
+    private fun checkAvailability() {
+        availabilityJob?.cancel()
+
+        // Não tenta iniciar ARCore no emulador.
+        if (isEmulator()) {
+            requestMode(useAr = false)
+            return
+        }
+
+        val expected = generation
+        var resolved = false
+
+        availabilityJob = viewLifecycleOwner.lifecycleScope.launch {
+            delay(AVAILABILITY_TIMEOUT_MS)
+
+            if (
+                !resolved &&
+                container != null &&
+                expected == generation
+            ) {
+                resolved = true
+                requestMode(useAr = false)
+            }
+        }
+
+        try {
+            ArCoreApk.getInstance()
+                .checkAvailabilityAsync(requireContext()) { availability ->
+                    activity?.runOnUiThread {
+                        if (
+                            !resolved &&
+                            container != null &&
+                            expected == generation
+                        ) {
+                            resolved = true
+                            availabilityJob?.cancel()
+                            availabilityJob = null
+
+                            val installed =
+                                availability ==
+                                        ArCoreApk.Availability.SUPPORTED_INSTALLED
+
+                            requestMode(useAr = installed)
+                        }
+                    }
+                }
+        } catch (_: Exception) {
+            if (
+                !resolved &&
+                container != null &&
+                expected == generation
+            ) {
+                resolved = true
+                availabilityJob?.cancel()
+                availabilityJob = null
+
+                requestMode(useAr = false)
+            }
+        }
+    }
+
+    private fun requestMode(useAr: Boolean) {
+        pendingAr = useAr
+
+        val permitted = ContextCompat.checkSelfPermission(
+            requireContext(),
+            Manifest.permission.CAMERA
+        ) == PackageManager.PERMISSION_GRANTED
+
+        when {
+            !permitted -> {
+                permissionLauncher.launch(Manifest.permission.CAMERA)
+            }
+
+            useAr -> startAr()
+
+            else -> startPreview(useCamera = true)
+        }
+    }
+
+    private fun startAr() {
+        val host = container ?: return
+
+        clearScene()
+        mode = Mode.AR
+
+        val expected = generation
+
+        statusText?.text = "Aponte para uma mesa ou para o chão."
+
+        placeButton?.apply {
+            text = "Posicionar"
+            isEnabled = false
+        }
+
+        try {
+            val ar = ARSceneView(requireContext())
+
+            arView = ar
+            sceneView = ar
+
+            ar.configureSession { _, config ->
+                config.planeFindingMode =
+                    Config.PlaneFindingMode.HORIZONTAL
+
+                config.lightEstimationMode =
                     Config.LightEstimationMode.DISABLED
             }
 
+            ar.onSessionFailed = {
+                host.post {
+                    if (
+                        container != null &&
+                        expected == generation &&
+                        mode == Mode.AR
+                    ) {
+                        startPreview(useCamera = true)
+                    }
+                }
+            }
 
-        // ========================================================
-        // PLACE
-        // ========================================================
+            ar.onSessionUpdated = { _, frame ->
+                if (
+                    expected == generation &&
+                    mode == Mode.AR
+                ) {
+                    arTracking =
+                        frame.camera.trackingState ==
+                                TrackingState.TRACKING
 
-        placeButton =
-            binding.place
+                    if (anchorNode == null) {
+                        placementHit =
+                            if (
+                                arTracking &&
+                                ar.width > 0 &&
+                                ar.height > 0
+                            ) {
+                                frame.hitTest(
+                                    ar.width / 2f,
+                                    ar.height / 2f
+                                ).firstOrNull { hit ->
+                                    val plane = hit.trackable as? Plane
 
+                                    plane != null &&
+                                            plane.type ==
+                                            Plane.Type.HORIZONTAL_UPWARD_FACING &&
+                                            plane.isPoseInPolygon(hit.hitPose)
+                                }
+                            } else {
+                                null
+                            }
 
-        placeButton.setOnClickListener {
+                        val ready =
+                            placementHit != null &&
+                                    modelNode != null
 
-            placeModel()
+                        placeButton?.isEnabled = ready
+
+                        statusText?.text =
+                            if (ready) {
+                                "Superfície encontrada. Toque em Posicionar."
+                            } else {
+                                "Mova o aparelho devagar sobre uma superfície."
+                            }
+                    }
+                }
+            }
+
+            ar.lifecycle = viewLifecycleOwner.lifecycle
+
+            host.addView(ar, fullSize())
+
+            startArWatchdog(expected)
+            loadModel()
+
+        } catch (_: Exception) {
+            startPreview(useCamera = true)
         }
-
-
-        // ========================================================
-        // JOYSTICK
-        // ========================================================
-
-        setupJoystick()
-
-
-        return binding.root
     }
 
+    /**
+     * Troca automaticamente quando o ARCore não consegue rastrear.
+     * Conta somente o tempo em que a tela está em primeiro plano.
+     * A ausência de uma superfície, sozinha, não provoca a troca.
+     */
+    private fun startArWatchdog(expected: Int) {
+        arWatchdogJob?.cancel()
 
-    // ============================================================
-    // JOYSTICK
-    // ============================================================
+        arWatchdogJob = viewLifecycleOwner.lifecycleScope.launch {
+            var withoutTrackingMs = 0L
+            var lastTime = SystemClock.elapsedRealtime()
 
-    private fun setupJoystick() {
+            while (isActive) {
+                delay(500L)
 
-        val joystick =
-            binding.joystick
+                if (
+                    container == null ||
+                    expected != generation ||
+                    mode != Mode.AR
+                ) {
+                    return@launch
+                }
 
-        val knob =
-            binding.joystickKnob
+                val now = SystemClock.elapsedRealtime()
+                val elapsed = now - lastTime
+                lastTime = now
 
+                val resumed = viewLifecycleOwner.lifecycle
+                    .currentState.isAtLeast(Lifecycle.State.RESUMED)
 
-        joystick.setOnTouchListener { view, event ->
+                if (!resumed || arTracking) {
+                    withoutTrackingMs = 0L
+                } else {
+                    withoutTrackingMs += elapsed
+                }
 
-            val centerX =
-                view.width / 2f
+                if (withoutTrackingMs >= AR_TIMEOUT_MS) {
+                    startPreview(useCamera = true)
+                    return@launch
+                }
+            }
+        }
+    }
 
-            val centerY =
-                view.height / 2f
+    private fun startPreview(useCamera: Boolean) {
+        val host = container ?: return
 
+        clearScene()
 
-            val maxDistance =
-                (view.width - knob.width) / 2f
+        mode = if (useCamera) Mode.CAMERA else Mode.STATIC
 
+        placeButton?.apply {
+            text = "Centralizar"
+            isEnabled = false
+        }
 
-            when (event.action) {
+        statusText?.text = if (useCamera) {
+            "Modelo sobre a câmera, sem fixação no ambiente."
+        } else {
+            "Visualização 3D sem câmera."
+        }
 
-                MotionEvent.ACTION_DOWN,
-                MotionEvent.ACTION_MOVE -> {
+        host.setBackgroundColor(Color.rgb(45, 55, 65))
 
-                    var dx =
-                        event.x - centerX
+        val cameraView = if (useCamera) {
+            PreviewView(requireContext()).apply {
+                implementationMode =
+                    PreviewView.ImplementationMode.COMPATIBLE
 
-                    var dy =
-                        event.y - centerY
+                scaleType = PreviewView.ScaleType.FILL_CENTER
 
+                host.addView(this, fullSize())
+            }
+        } else {
+            null
+        }
 
-                    val distance =
-                        sqrt(
-                            dx * dx +
-                                    dy * dy
-                        )
+        try {
+            val scene = SceneView(
+                context = requireContext(),
+                isOpaque = !useCamera
+            )
 
+            scene.lifecycle = viewLifecycleOwner.lifecycle
+            scene.cameraNode.position = Position(0f, 0f, 3f)
+            scene.cameraNode.lookAt(Position(0f, 0f, 0f))
 
-                    // =========================================
-                    // LIMITAR AO CÍRCULO
-                    // =========================================
+            sceneView = scene
 
-                    if (
-                        distance > maxDistance &&
-                        distance > 0f
-                    ) {
+            host.addView(scene, fullSize())
 
-                        dx =
-                            dx / distance *
-                                    maxDistance
+            loadModel()
 
-                        dy =
-                            dy / distance *
-                                    maxDistance
+            if (cameraView != null) {
+                openCamera(cameraView)
+            }
+        } catch (_: Exception) {
+            statusText?.text = "Não foi possível iniciar a cena 3D."
+        }
+    }
+
+    private fun openCamera(previewView: PreviewView) {
+        val context = context ?: return
+
+        val expected = generation
+        val owner = viewLifecycleOwner
+
+        // O prazo também cobre a obtenção do CameraProvider.
+        startCameraWatchdog(expected)
+
+        try {
+            val future = ProcessCameraProvider.getInstance(context)
+
+            future.addListener({
+                if (
+                    container == null ||
+                    expected != generation ||
+                    mode != Mode.CAMERA
+                ) {
+                    return@addListener
+                }
+
+                try {
+                    val provider = future.get()
+
+                    val selector = when {
+                        provider.hasCamera(
+                            CameraSelector.DEFAULT_BACK_CAMERA
+                        ) -> CameraSelector.DEFAULT_BACK_CAMERA
+
+                        provider.hasCamera(
+                            CameraSelector.DEFAULT_FRONT_CAMERA
+                        ) -> CameraSelector.DEFAULT_FRONT_CAMERA
+
+                        else -> {
+                            startPreview(useCamera = false)
+                            return@addListener
+                        }
                     }
 
+                    val preview = Preview.Builder().build()
 
-                    // =========================================
-                    // KNOB
-                    // =========================================
+                    preview.setSurfaceProvider(
+                        previewView.surfaceProvider
+                    )
 
-                    knob.translationX = dx
-                    knob.translationY = dy
+                    cameraProvider = provider
+                    cameraPreview = preview
 
+                    previewView.previewStreamState.observe(owner) { state ->
+                        if (
+                            expected == generation &&
+                            mode == Mode.CAMERA
+                        ) {
+                            cameraStreaming =
+                                state == PreviewView.StreamState.STREAMING
+                        }
+                    }
 
-                    // =========================================
-                    // VALORES NORMALIZADOS
-                    // =========================================
+                    provider.bindToLifecycle(
+                        owner,
+                        selector,
+                        preview
+                    )
 
-                    targetX =
-                        (dx / maxDistance)
-                            .coerceIn(-1f, 1f)
-
-                    targetY =
-                        (dy / maxDistance)
-                            .coerceIn(-1f, 1f)
-
-
-                    joystickPressed = true
-
-
-                    true
+                } catch (_: Exception) {
+                    if (
+                        expected == generation &&
+                        container != null
+                    ) {
+                        startPreview(useCamera = false)
+                    }
                 }
+            }, ContextCompat.getMainExecutor(context))
 
-
-                MotionEvent.ACTION_UP,
-                MotionEvent.ACTION_CANCEL -> {
-
-                    targetX = 0f
-                    targetY = 0f
-
-                    joystickPressed = false
-
-
-                    knob.animate()
-                        .translationX(0f)
-                        .translationY(0f)
-                        .setDuration(120)
-                        .start()
-
-
-                    true
-                }
-
-
-                else -> false
-            }
-        }
-    }
-
-
-    // ============================================================
-    // MOVIMENTO DO BONECO
-    // ============================================================
-
-    private fun moveCharacter() {
-
-        if (!::modelNode.isInitialized) {
-            return
-        }
-
-
-        if (!joystickPressed) {
-
-            // Suaviza a parada
-            joystickX *= 0.85f
-            joystickY *= 0.85f
-
+        } catch (_: Exception) {
             if (
-                abs(joystickX) < 0.01f &&
-                abs(joystickY) < 0.01f
+                expected == generation &&
+                container != null
             ) {
-
-                joystickX = 0f
-                joystickY = 0f
+                startPreview(useCamera = false)
             }
-
-        } else {
-
-            // Suaviza o joystick
-            joystickX +=
-                (targetX - joystickX) *
-                        smoothness
-
-            joystickY +=
-                (targetY - joystickY) *
-                        smoothness
         }
+    }
 
+    private fun startCameraWatchdog(expected: Int) {
+        cameraWatchdogJob?.cancel()
 
-        val magnitude =
-            sqrt(
-                joystickX * joystickX +
-                        joystickY * joystickY
-            )
+        cameraWatchdogJob = viewLifecycleOwner.lifecycleScope.launch {
+            var withoutCameraMs = 0L
+            var lastTime = SystemClock.elapsedRealtime()
 
+            while (isActive) {
+                delay(500L)
 
-        if (magnitude < 0.03f) {
+                if (
+                    container == null ||
+                    expected != generation ||
+                    mode != Mode.CAMERA
+                ) {
+                    return@launch
+                }
+
+                val now = SystemClock.elapsedRealtime()
+                val elapsed = now - lastTime
+                lastTime = now
+
+                val resumed = viewLifecycleOwner.lifecycle
+                    .currentState.isAtLeast(Lifecycle.State.RESUMED)
+
+                if (!resumed || cameraStreaming) {
+                    withoutCameraMs = 0L
+                } else {
+                    withoutCameraMs += elapsed
+                }
+
+                if (withoutCameraMs >= CAMERA_TIMEOUT_MS) {
+                    startPreview(useCamera = false)
+                    return@launch
+                }
+            }
+        }
+    }
+
+    private fun loadModel() {
+        val scene = sceneView ?: return
+        val location = modelLocation(currentModelFile)
+
+        if (location == null) {
+            statusText?.text =
+                "Modelo não encontrado: $currentModelFile"
+
+            placeButton?.isEnabled = false
             return
         }
 
+        loadJob?.cancel()
+        removeModel()
 
-        // ========================================================
-        // DIREÇÃO
-        // ========================================================
+        val expected = generation
+        val expectedModel = ++modelGeneration
+        val isAr = mode == Mode.AR
+        val fileName = currentModelFile
 
-        val directionX =
-            joystickX
+        placeButton?.isEnabled = false
 
-        val directionZ =
-            joystickY
+        loadJob = viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                val instance =
+                    scene.modelLoader.loadModelInstance(location)
 
+                if (
+                    expected != generation ||
+                    expectedModel != modelGeneration ||
+                    sceneView !== scene
+                ) {
+                    return@launch
+                }
 
-        // ========================================================
-        // VELOCIDADE
-        // ========================================================
+                if (instance == null) {
+                    statusText?.text = "Não foi possível abrir o modelo."
+                    return@launch
+                }
 
-        val currentSpeed =
-            speed *
-                    magnitude.coerceIn(0f, 1f)
-
-
-        val moveX =
-            directionX * currentSpeed
-
-        val moveZ =
-            directionZ * currentSpeed
-
-
-        // ========================================================
-        // POSIÇÃO
-        // ========================================================
-
-        modelNode.position.x += moveX
-
-        modelNode.position.z += moveZ
-
-
-        // ========================================================
-        // ROTAÇÃO
-        // ========================================================
-
-        val targetRotation =
-            Math.toDegrees(
-                atan2(
-                    directionX.toDouble(),
-                    directionZ.toDouble()
+                val node = ModelNode(
+                    modelInstance = instance,
+                    scaleToUnits = if (isAr) 0.5f else 1.5f,
+                    centerOrigin = Position(0f, 0f, 0f)
                 )
-            ).toFloat()
 
+                node.isEditable = true
+                modelNode = node
 
-        var difference =
-            targetRotation -
-                    modelNode.rotation.y
+                if (!isAr) {
+                    scene.addChildNode(node)
+                    placeButton?.isEnabled = true
+                }
 
-
-        // ========================================================
-        // CORRIGIR VOLTA DE 360°
-        // ========================================================
-
-        while (difference > 180f) {
-            difference -= 360f
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                if (
+                    expected == generation &&
+                    expectedModel == modelGeneration
+                ) {
+                    statusText?.text =
+                        "Erro ao carregar: $fileName"
+                }
+            }
         }
-
-        while (difference < -180f) {
-            difference += 360f
-        }
-
-
-        // ========================================================
-        // ROTACIONAR SUAVEMENTE
-        // ========================================================
-
-        modelNode.rotation.y +=
-            difference *
-                    rotationSmoothness
     }
-
-
-    // ============================================================
-    // VIEW CREATED
-    // ============================================================
-
-    override fun onViewCreated(
-        view: View,
-        savedInstanceState: Bundle?
-    ) {
-
-        super.onViewCreated(
-            view,
-            savedInstanceState
-        )
-
-
-        checkCameraPermission()
-
-
-        handler.post(
-            movementLoop
-        )
-    }
-
-
-    // ============================================================
-    // DESTROY VIEW
-    // ============================================================
-
-    override fun onDestroyView() {
-
-        handler.removeCallbacks(
-            movementLoop
-        )
-
-        super.onDestroyView()
-
-        _binding = null
-    }
-
-
-    // ============================================================
-    // COLOCAR MODELO
-    // ============================================================
 
     private fun placeModel() {
+        val ar = arView ?: return
 
-        if (!::modelNode.isInitialized) {
+        if (anchorNode != null) {
+            loadModel()
             return
         }
 
+        val hit = placementHit ?: return
+        val model = modelNode ?: return
 
-        // Cria o Anchor
-        modelNode.anchor()
-
-
-        // Não permitir arrastar o boneco
-        modelNode.isEditable = false
-
-        modelNode.isScaleEditable = false
-
-
-        // Esconde os planos
-        sceneView
-            .planeRenderer
-            .isVisible = false
-
-
-        // ========================================================
-        // SOM
-        // ========================================================
-
-        val soundResource = when (currentModelFile) {
-
-            "old_man_walk_cycle.glb" ->
-                R.raw.fahh
-
-            "an_elderly_man.glb" ->
-                R.raw.fahh
-
-            "cadeira.glb" ->
-                R.raw.fart
-
-            "becks_garrafa.glb" ->
-                R.raw.latinha
-
-            else ->
-                null
-        }
-
-
-        soundResource?.let { sound ->
-
-            val mediaPlayer =
-                MediaPlayer.create(
-                    requireContext(),
-                    sound
-                )
-
-
-            mediaPlayer?.apply {
-
-                start()
-
-                setOnCompletionListener { player ->
-
-                    player.release()
-                }
-            }
-        }
-    }
-
-
-    // ============================================================
-    // PERMISSÃO
-    // ============================================================
-
-    private fun checkCameraPermission() {
-
-        if (
-            ContextCompat.checkSelfPermission(
-                requireContext(),
-                android.Manifest.permission.CAMERA
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-
-            ActivityCompat.requestPermissions(
-                requireActivity(),
-                arrayOf(
-                    android.Manifest.permission.CAMERA
-                ),
-                CAMERA_PERMISSION_CODE
+        try {
+            val anchor = AnchorNode(
+                engine = ar.engine,
+                anchor = hit.createAnchor()
             )
 
-        } else {
+            anchor.addChildNode(model)
+            ar.addChildNode(anchor)
 
-            initAR()
-        }
-    }
+            anchorNode = anchor
+            placementHit = null
 
-
-    // ============================================================
-    // RESULTADO DA PERMISSÃO
-    // ============================================================
-
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
-
-        super.onRequestPermissionsResult(
-            requestCode,
-            permissions,
-            grantResults
-        )
-
-
-        if (
-            requestCode == CAMERA_PERMISSION_CODE &&
-            grantResults.isNotEmpty() &&
-            grantResults[0] ==
-            PackageManager.PERMISSION_GRANTED
-        ) {
-
-            initAR()
-
-        } else {
-
-            Toast.makeText(
-                requireContext(),
-                "Permissão de câmera negada",
-                Toast.LENGTH_LONG
-            ).show()
-        }
-    }
-
-
-    // ============================================================
-    // INICIAR AR
-    // ============================================================
-
-    private fun initAR() {
-
-        loadModel(
-            currentModelFile
-        )
-    }
-
-
-    // ============================================================
-    // CARREGAR MODELO
-    // ============================================================
-
-    private fun loadModel(
-        fileName: String
-    ) {
-
-        try {
-
-            if (::modelNode.isInitialized) {
-
-                sceneView.removeChild(
-                    modelNode
-                )
+            placeButton?.apply {
+                text = "Reposicionar"
+                isEnabled = true
             }
 
-        } catch (e: Exception) {
+            statusText?.text = "Objeto posicionado no ambiente."
 
-            // Modelo ainda não existe
+        } catch (_: Exception) {
+            statusText?.text =
+                "Não foi possível posicionar. Tente outra superfície."
         }
-
-
-        // ========================================================
-        // CRIAR MODELO
-        // ========================================================
-
-        modelNode =
-            ArModelNode(
-                sceneView.engine,
-                PlacementMode.INSTANT
-            ).apply {
-
-                loadModelGlbAsync(
-                    glbFileLocation =
-                        getFilePath(
-                            requireContext(),
-                            fileName
-                        ),
-
-                    centerOrigin =
-                        Position(
-                            0f,
-                            0f,
-                            1f
-                        )
-                ) {
-
-                    sceneView
-                        .planeRenderer
-                        .isVisible = true
-                }
-
-
-                isEditable = false
-
-                isScaleEditable = false
-            }
-
-
-        sceneView.addChild(
-            modelNode
-        )
     }
 
-
-    // ============================================================
-    // LOCALIZAR GLB
-    // ============================================================
-
-    private fun getFilePath(
-        context: Context?,
-        fileName: String
-    ): String {
+    private fun modelLocation(fileName: String): String? {
+        val context = context ?: return null
 
         try {
-
-            context
-                ?.assets
-                ?.open(fileName)
-                ?.close()
-
-
+            context.assets.open(fileName).use { }
             return fileName
+        } catch (_: Exception) {
+            // Procura no armazenamento interno.
+        }
 
-        } catch (e: IOException) {
+        val file = File(context.filesDir, fileName)
 
-            val internalFile =
-                File(
-                    context?.filesDir,
-                    fileName
-                )
+        return if (file.isFile) {
+            Uri.fromFile(file).toString()
+        } else {
+            null
+        }
+    }
 
+    private fun removeModel() {
+        val scene = sceneView
 
-            if (internalFile.exists()) {
-
-                return Uri.fromFile(
-                    internalFile
-                ).toString()
-
-            } else {
-
-                return "Arquivo não encontrado em assets nem em filesDir: $fileName"
+        modelNode?.let { model ->
+            runCatching {
+                anchorNode?.removeChildNode(model)
+                scene?.removeChildNode(model)
+                model.destroy()
             }
         }
+
+        modelNode = null
+
+        anchorNode?.let { anchor ->
+            runCatching {
+                scene?.removeChildNode(anchor)
+                anchor.anchor.detach()
+                anchor.destroy()
+            }
+        }
+
+        anchorNode = null
+        placementHit = null
+
+        if (mode == Mode.AR) {
+            placeButton?.text = "Posicionar"
+        }
+    }
+
+    private fun clearScene() {
+        generation++
+        modelGeneration++
+
+        arWatchdogJob?.cancel()
+        arWatchdogJob = null
+
+        cameraWatchdogJob?.cancel()
+        cameraWatchdogJob = null
+
+        loadJob?.cancel()
+        loadJob = null
+
+        cameraPreview?.let { preview ->
+            runCatching {
+                cameraProvider?.unbind(preview)
+            }
+        }
+
+        cameraPreview = null
+        cameraProvider = null
+
+        arTracking = false
+        cameraStreaming = false
+
+        removeModel()
+
+        sceneView?.let { scene ->
+            runCatching {
+                scene.lifecycle = null
+                scene.destroy()
+            }
+        }
+
+        sceneView = null
+        arView = null
+
+        container?.removeAllViews()
+    }
+
+    private fun fullSize() = FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT,
+        ViewGroup.LayoutParams.MATCH_PARENT
+    )
+
+    private fun dp(value: Int): Int {
+        return (value * resources.displayMetrics.density).toInt()
+    }
+
+    override fun onDestroyView() {
+        availabilityJob?.cancel()
+        availabilityJob = null
+
+        clearScene()
+
+        overlay?.let {
+            (it.parent as? ViewGroup)?.removeView(it)
+        }
+
+        overlay = null
+        statusText = null
+        placeButton = null
+        container = null
+
+        pendingAr = false
+        mode = Mode.CHECKING
+
+        super.onDestroyView()
     }
 }

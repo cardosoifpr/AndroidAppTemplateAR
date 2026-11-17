@@ -1,18 +1,16 @@
+
 package com.ifpr.androidapptemplatear.ui
 
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
-import android.os.SystemClock
-import android.view.Gravity
-import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.Button
 import android.widget.FrameLayout
-import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
@@ -21,93 +19,76 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
-import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
-import com.google.ar.core.ArCoreApk
-import com.google.ar.core.Config
-import com.google.ar.core.HitResult
-import com.google.ar.core.Plane
-import com.google.ar.core.TrackingState
 import com.ifpr.androidapptemplatear.R
 import io.github.sceneview.SceneView
-import io.github.sceneview.ar.ARSceneView
-import io.github.sceneview.ar.node.AnchorNode
 import io.github.sceneview.math.Position
 import io.github.sceneview.node.ModelNode
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
 
 class CameraFragment : Fragment() {
 
-    private enum class Mode {
-        CHECKING,
-        AR,
-        CAMERA,
-        STATIC
-    }
-
     companion object {
-        private const val AVAILABILITY_TIMEOUT_MS = 4000L
-        private const val AR_TIMEOUT_MS = 15000L
-        private const val CAMERA_TIMEOUT_MS = 8000L
+        private const val VIDA_MAXIMA = 100
     }
 
-    private val localizacaoController = LocalizacaoController(this)
-
-    private var mode = Mode.CHECKING
+    private lateinit var sharedViewModel: SharedModelViewModel
+    private lateinit var batalhaViewModel: BatalhaViewModel
 
     private var container: FrameLayout? = null
     private var placeButton: ExtendedFloatingActionButton? = null
     private var statusText: TextView? = null
-    private var overlay: View? = null
 
     private var sceneView: SceneView? = null
-    private var arView: ARSceneView? = null
 
-    private var modelNode: ModelNode? = null
-    private var anchorNode: AnchorNode? = null
-    private var placementHit: HitResult? = null
+    private var modelNode1: ModelNode? = null
+    private var modelNode2: ModelNode? = null
+
+    private var modelosVisiveis = false
 
     private var cameraProvider: ProcessCameraProvider? = null
     private var cameraPreview: Preview? = null
 
     private var loadJob: Job? = null
-    private var availabilityJob: Job? = null
-    private var arWatchdogJob: Job? = null
-    private var cameraWatchdogJob: Job? = null
-
     private var generation = 0
     private var modelGeneration = 0
-    private var pendingAr = false
 
-    private var arTracking = false
-    private var cameraStreaming = false
+    private var personagem1: String? = null
+    private var personagem2: String? = null
 
-    private var currentModelFile = "lumine.glb"
+    private var vidaBar1: ProgressBar? = null
+    private var vidaBar2: ProgressBar? = null
+    private var vidaTexto1: TextView? = null
+    private var vidaTexto2: TextView? = null
+    private var turnoTexto: TextView? = null
 
-    private lateinit var sharedViewModel: SharedModelViewModel
+    private var ataqueButton: Button? = null
+    private var reiniciarButton: Button? = null
+    private var gameOverPanel: View? = null
+    private var winnerText: TextView? = null
+    private var restartGameButton: Button? = null
 
     private val permissionLauncher =
         registerForActivityResult(
             ActivityResultContracts.RequestPermission()
         ) { granted ->
-            if (container != null) {
-                when {
-                    !granted -> startPreview(useCamera = false)
-                    pendingAr -> startAr()
-                    else -> startPreview(useCamera = true)
-                }
+
+            if (container == null) return@registerForActivityResult
+
+            if (granted) {
+                startPreview(useCamera = true)
+            } else {
+                startPreview(useCamera = false)
             }
         }
 
     override fun onCreateView(
-        inflater: LayoutInflater,
+        inflater: android.view.LayoutInflater,
         parent: ViewGroup?,
         savedInstanceState: Bundle?
     ): View {
@@ -127,412 +108,358 @@ class CameraFragment : Fragment() {
         container = view.findViewById(R.id.sceneContainer)
         placeButton = view.findViewById(R.id.place)
 
-        createControls()
+        sharedViewModel = ViewModelProvider(requireActivity())
+            .get(SharedModelViewModel::class.java)
 
-        sharedViewModel =
-            ViewModelProvider(requireActivity())[
-                SharedModelViewModel::class.java
-            ]
+        batalhaViewModel = ViewModelProvider(this)
+            .get(BatalhaViewModel::class.java)
 
-        val selectedModel = sharedViewModel.selectedModel.value
+        configurarInterface(view)
 
-        if (!selectedModel.isNullOrBlank()) {
-            currentModelFile = selectedModel
-        } else {
-            sharedViewModel.selectModel(currentModelFile)
-        }
+        personagem1 = sharedViewModel.personagem1.value
+        personagem2 = sharedViewModel.personagem2.value
 
-        sharedViewModel.selectedModel.observe(viewLifecycleOwner) { path ->
-            if (!path.isNullOrBlank() && path != currentModelFile) {
-                currentModelFile = path
-                loadModel()
-            }
-        }
+        configurarBatalha()
+        observarPersonagens()
 
         placeButton?.setOnClickListener {
-            when (mode) {
-                Mode.AR -> placeModel()
-
-                Mode.CAMERA,
-                Mode.STATIC -> {
-                    startPreview(useCamera = mode == Mode.CAMERA)
-                }
-
-                Mode.CHECKING -> Unit
-            }
+            centralizarModelos()
         }
 
-        checkAvailability()
-
-        val parent = container?.parent as? ViewGroup
-
-        if (parent != null) {
-            localizacaoController.conectar(parent) { arquivo ->
-                sharedViewModel.selectModel(arquivo)
-            }
-
-            placeButton?.bringToFront()
-        }
+        validarSelecao()
+        solicitarCamera()
     }
 
-    private fun createControls() {
-        val parent = container?.parent as? ViewGroup ?: return
+    // ---------------------------------------------------------
+    // PERMISSÃO E INICIALIZAÇÃO
+    // ---------------------------------------------------------
 
-        val layer = FrameLayout(requireContext())
+    private fun solicitarCamera() {
 
-        val panel = LinearLayout(requireContext()).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-            setBackgroundColor(Color.argb(190, 25, 30, 35))
-        }
-
-        statusText = TextView(requireContext()).apply {
-            text = "Preparando visualização…"
-            textSize = 13f
-            setTextColor(Color.WHITE)
-        }
-
-        panel.addView(statusText)
-
-        layer.addView(
-            panel,
-            FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                Gravity.BOTTOM
-            ).apply {
-                leftMargin = dp(12)
-                rightMargin = dp(12)
-                bottomMargin = dp(85)
-            }
-        )
-
-        parent.addView(
-            layer,
-            ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-        )
-
-        overlay = layer
-
-        parent.findViewById<View>(R.id.titleImage)?.bringToFront()
-        placeButton?.bringToFront()
-    }
-
-    private fun isEmulator(): Boolean {
-        return Build.FINGERPRINT.startsWith("generic") ||
-                Build.FINGERPRINT.startsWith("unknown") ||
-                Build.MODEL.contains("google_sdk", ignoreCase = true) ||
-                Build.MODEL.contains("Emulator", ignoreCase = true) ||
-                Build.MODEL.contains(
-                    "Android SDK built for",
-                    ignoreCase = true
-                ) ||
-                Build.PRODUCT.contains("sdk", ignoreCase = true) ||
-                Build.HARDWARE.contains("goldfish", ignoreCase = true) ||
-                Build.HARDWARE.contains("ranchu", ignoreCase = true)
-    }
-
-    private fun checkAvailability() {
-        availabilityJob?.cancel()
-
-        // Não tenta iniciar ARCore no emulador.
-        if (isEmulator()) {
-            requestMode(useAr = false)
-            return
-        }
-
-        val expected = generation
-        var resolved = false
-
-        availabilityJob = viewLifecycleOwner.lifecycleScope.launch {
-            delay(AVAILABILITY_TIMEOUT_MS)
-
-            if (
-                !resolved &&
-                container != null &&
-                expected == generation
-            ) {
-                resolved = true
-                requestMode(useAr = false)
-            }
-        }
-
-        try {
-            ArCoreApk.getInstance()
-                .checkAvailabilityAsync(requireContext()) { availability ->
-                    activity?.runOnUiThread {
-                        if (
-                            !resolved &&
-                            container != null &&
-                            expected == generation
-                        ) {
-                            resolved = true
-                            availabilityJob?.cancel()
-                            availabilityJob = null
-
-                            // ALTERAÇÃO:
-                            // Sempre utiliza a câmera sem exigir ARCore.
-                            requestMode(useAr = false)
-                        }
-                    }
-                }
-        } catch (_: Exception) {
-            if (
-                !resolved &&
-                container != null &&
-                expected == generation
-            ) {
-                resolved = true
-                availabilityJob?.cancel()
-                availabilityJob = null
-
-                requestMode(useAr = false)
-            }
-        }
-    }
-
-    private fun requestMode(useAr: Boolean) {
-        pendingAr = useAr
-
-        val permitted = ContextCompat.checkSelfPermission(
+        val permitido = ContextCompat.checkSelfPermission(
             requireContext(),
             Manifest.permission.CAMERA
         ) == PackageManager.PERMISSION_GRANTED
 
-        when {
-            !permitted -> {
-                permissionLauncher.launch(Manifest.permission.CAMERA)
-            }
-
-            useAr -> startAr()
-
-            else -> startPreview(useCamera = true)
+        if (permitido) {
+            startPreview(useCamera = true)
+        } else {
+            permissionLauncher.launch(Manifest.permission.CAMERA)
         }
     }
 
-    private fun startAr() {
-        val host = container ?: return
+    // ---------------------------------------------------------
+    // INTERFACE
+    // ---------------------------------------------------------
 
-        clearScene()
-        mode = Mode.AR
+    private fun configurarInterface(view: View) {
 
-        val expected = generation
+        statusText = view.findViewById(R.id.statusText)
 
-        statusText?.text = "Aponte para uma mesa ou para o chão."
+        vidaTexto1 = view.findViewById(R.id.healthPlayer1)
+        vidaTexto2 = view.findViewById(R.id.healthPlayer2)
+
+        vidaBar1 = view.findViewById(R.id.barPlayer1)
+        vidaBar2 = view.findViewById(R.id.barPlayer2)
+
+        turnoTexto = view.findViewById(R.id.turnText)
+
+        ataqueButton = view.findViewById(R.id.attackButton)
+        reiniciarButton = view.findViewById(R.id.restartButton)
+
+        gameOverPanel = view.findViewById(R.id.gameOverPanel)
+        winnerText = view.findViewById(R.id.winnerText)
+        restartGameButton = view.findViewById(R.id.restartGameButton)
+
+        ataqueButton?.setOnClickListener {
+            batalhaViewModel.atacar()
+        }
+
+        reiniciarButton?.setOnClickListener {
+            reiniciarBatalha()
+        }
+
+        restartGameButton?.setOnClickListener {
+            reiniciarBatalha()
+        }
+
+        gameOverPanel?.visibility = View.GONE
+        reiniciarButton?.visibility = View.GONE
+
+        ataqueButton?.isEnabled = false
 
         placeButton?.apply {
-            text = "Posicionar"
+            text = "Mostrar personagens"
             isEnabled = false
         }
+    }
 
-        try {
-            val ar = ARSceneView(requireContext())
+    // ---------------------------------------------------------
+    // PERSONAGENS SELECIONADOS
+    // ---------------------------------------------------------
 
-            arView = ar
-            sceneView = ar
+    private fun observarPersonagens() {
 
-            ar.configureSession { _, config ->
-                config.planeFindingMode =
-                    Config.PlaneFindingMode.HORIZONTAL
-
-                config.lightEstimationMode =
-                    Config.LightEstimationMode.DISABLED
+        sharedViewModel.personagem1.observe(viewLifecycleOwner) { arquivo ->
+            if (arquivo != personagem1) {
+                personagem1 = arquivo
+                atualizarSelecao()
             }
+        }
 
-            ar.onSessionFailed = {
-                host.post {
-                    if (
-                        container != null &&
-                        expected == generation &&
-                        mode == Mode.AR
-                    ) {
-                        startPreview(useCamera = true)
-                    }
-                }
+        sharedViewModel.personagem2.observe(viewLifecycleOwner) { arquivo ->
+            if (arquivo != personagem2) {
+                personagem2 = arquivo
+                atualizarSelecao()
             }
-
-            ar.onSessionUpdated = { _, frame ->
-                if (
-                    expected == generation &&
-                    mode == Mode.AR
-                ) {
-                    arTracking =
-                        frame.camera.trackingState ==
-                                TrackingState.TRACKING
-
-                    if (anchorNode == null) {
-                        placementHit =
-                            if (
-                                arTracking &&
-                                ar.width > 0 &&
-                                ar.height > 0
-                            ) {
-                                frame.hitTest(
-                                    ar.width / 2f,
-                                    ar.height / 2f
-                                ).firstOrNull { hit ->
-                                    val plane = hit.trackable as? Plane
-
-                                    plane != null &&
-                                            plane.type ==
-                                            Plane.Type.HORIZONTAL_UPWARD_FACING &&
-                                            plane.isPoseInPolygon(hit.hitPose)
-                                }
-                            } else {
-                                null
-                            }
-
-                        val ready =
-                            placementHit != null &&
-                                    modelNode != null
-
-                        placeButton?.isEnabled = ready
-
-                        statusText?.text =
-                            if (ready) {
-                                "Superfície encontrada. Toque em Posicionar."
-                            } else {
-                                "Mova o aparelho devagar sobre uma superfície."
-                            }
-                    }
-                }
-            }
-
-            ar.lifecycle = viewLifecycleOwner.lifecycle
-
-            host.addView(ar, fullSize())
-
-            startArWatchdog(expected)
-            loadModel()
-
-        } catch (_: Exception) {
-            startPreview(useCamera = true)
         }
     }
 
-    private fun startArWatchdog(expected: Int) {
-        arWatchdogJob?.cancel()
+    private fun atualizarSelecao() {
 
-        arWatchdogJob = viewLifecycleOwner.lifecycleScope.launch {
-            var withoutTrackingMs = 0L
-            var lastTime = SystemClock.elapsedRealtime()
+        validarSelecao()
 
-            while (isActive) {
-                delay(500L)
-
-                if (
-                    container == null ||
-                    expected != generation ||
-                    mode != Mode.AR
-                ) {
-                    return@launch
-                }
-
-                val now = SystemClock.elapsedRealtime()
-                val elapsed = now - lastTime
-                lastTime = now
-
-                val resumed = viewLifecycleOwner.lifecycle
-                    .currentState.isAtLeast(Lifecycle.State.RESUMED)
-
-                if (!resumed || arTracking) {
-                    withoutTrackingMs = 0L
-                } else {
-                    withoutTrackingMs += elapsed
-                }
-
-                if (withoutTrackingMs >= AR_TIMEOUT_MS) {
-                    startPreview(useCamera = true)
-                    return@launch
-                }
-            }
+        if (
+            !personagem1.isNullOrBlank() &&
+            !personagem2.isNullOrBlank() &&
+            personagem1 != personagem2
+        ) {
+            batalhaViewModel.iniciarBatalha(
+                personagem1,
+                personagem2
+            )
         }
     }
+
+    private fun validarSelecao() {
+
+        val primeiro = personagem1
+        val segundo = personagem2
+
+        if (primeiro.isNullOrBlank() || segundo.isNullOrBlank()) {
+            statusText?.text = "Volte e selecione os dois personagens."
+            ataqueButton?.isEnabled = false
+            placeButton?.isEnabled = false
+            return
+        }
+
+        if (primeiro == segundo) {
+            statusText?.text = "Escolha dois personagens diferentes."
+            ataqueButton?.isEnabled = false
+            placeButton?.isEnabled = false
+            return
+        }
+
+        if (sceneView != null) {
+            carregarModelos()
+        }
+    }
+
+    // ---------------------------------------------------------
+    // SISTEMA DE BATALHA
+    // ---------------------------------------------------------
+
+    private fun configurarBatalha() {
+
+        batalhaViewModel.estado.observe(viewLifecycleOwner) { estado ->
+            atualizarInterfaceBatalha(estado)
+        }
+
+        if (
+            !personagem1.isNullOrBlank() &&
+            !personagem2.isNullOrBlank()
+        ) {
+            batalhaViewModel.iniciarBatalha(
+                personagem1,
+                personagem2
+            )
+        }
+    }
+
+    private fun reiniciarBatalha() {
+        batalhaViewModel.jogarNovamente()
+        centralizarModelos()
+    }
+
+
+    private fun atualizarInterfaceBatalha(
+        estado: BatalhaEstado
+    ) {
+        vidaBar1?.max = VIDA_MAXIMA
+        vidaBar2?.max = VIDA_MAXIMA
+
+        vidaBar1?.progress = estado.vida1
+        vidaBar2?.progress = estado.vida2
+
+        vidaTexto1?.text =
+            "${nomePersonagem(estado.personagem1)} • ${estado.vida1}/$VIDA_MAXIMA HP"
+
+        vidaTexto2?.text =
+            "${nomePersonagem(estado.personagem2)} • ${estado.vida2}/$VIDA_MAXIMA HP"
+
+        turnoTexto?.text = when {
+            estado.batalhaFinalizada -> "FIM DE BATALHA"
+
+            estado.personagem1.isBlank() ||
+                    estado.personagem2.isBlank() ->
+                "Aguardando personagens"
+
+            estado.turno == 1 ->
+                "Turno: ${nomePersonagem(estado.personagem1)}"
+
+            else ->
+                "Turno: ${nomePersonagem(estado.personagem2)}"
+        }
+
+        if (estado.batalhaFinalizada) {
+            ocultarModelos()
+
+            gameOverPanel?.visibility = View.VISIBLE
+            reiniciarButton?.visibility = View.VISIBLE
+            winnerText?.text = estado.mensagem
+
+            ataqueButton?.isEnabled = false
+            placeButton?.isEnabled = false
+
+            statusText?.text = "Batalha encerrada!"
+        } else {
+            gameOverPanel?.visibility = View.GONE
+            reiniciarButton?.visibility = View.GONE
+
+            placeButton?.isEnabled =
+                modelNode1 != null && modelNode2 != null
+
+            ataqueButton?.isEnabled =
+                estado.personagem1.isNotBlank() &&
+                        estado.personagem2.isNotBlank() &&
+                        modelosVisiveis &&
+                        modelNode1 != null &&
+                        modelNode2 != null
+        }
+    }
+
+    private fun ocultarModelos() {
+        val scene = sceneView
+
+        modelNode1?.let { node ->
+            runCatching {
+                scene?.removeChildNode(node)
+            }
+        }
+
+        modelNode2?.let { node ->
+            runCatching {
+                scene?.removeChildNode(node)
+            }
+        }
+
+        modelosVisiveis = false
+    }
+
+
+    private fun nomePersonagem(arquivo: String?): String {
+
+        if (arquivo.isNullOrBlank()) return "Personagem"
+
+        return arquivo
+            .substringAfterLast("/")
+            .substringBeforeLast(".")
+            .replace("_", " ")
+            .replaceFirstChar { it.uppercase() }
+    }
+
+    // ---------------------------------------------------------
+    // CÂMERA E CENA 3D
+    // ---------------------------------------------------------
 
     private fun startPreview(useCamera: Boolean) {
+
         val host = container ?: return
 
         clearScene()
 
-        mode = if (useCamera) Mode.CAMERA else Mode.STATIC
+        host.setBackgroundColor(Color.rgb(25, 30, 40))
+
+        modelosVisiveis = false
 
         placeButton?.apply {
-            text = "Centralizar"
+            text = "Mostrar personagens"
             isEnabled = false
         }
 
-        statusText?.text = if (useCamera) {
-            "Modelo sobre a câmera, sem fixação no ambiente."
-        } else {
-            "Visualização 3D sem câmera."
-        }
+        if (useCamera) {
 
-        host.setBackgroundColor(Color.rgb(45, 55, 65))
-
-        val cameraView = if (useCamera) {
-            PreviewView(requireContext()).apply {
+            val previewView = PreviewView(requireContext()).apply {
                 implementationMode =
                     PreviewView.ImplementationMode.COMPATIBLE
 
-                scaleType = PreviewView.ScaleType.FILL_CENTER
-
-                host.addView(this, fullSize())
+                scaleType =
+                    PreviewView.ScaleType.FILL_CENTER
             }
+
+            host.addView(previewView, fullSize())
+
+            abrirCamera(previewView)
+
         } else {
-            null
+            statusText?.text =
+                "Câmera indisponível. Exibindo cenário 3D."
         }
 
         try {
+
             val scene = SceneView(
                 context = requireContext(),
-                isOpaque = !useCamera
+                isOpaque = false
             )
 
             scene.lifecycle = viewLifecycleOwner.lifecycle
+
             scene.cameraNode.position = Position(0f, 0f, 3f)
             scene.cameraNode.lookAt(Position(0f, 0f, 0f))
 
             sceneView = scene
 
+            // A cena fica sobre a imagem da câmera.
             host.addView(scene, fullSize())
 
-            loadModel()
-
-            if (cameraView != null) {
-                openCamera(cameraView)
+            if (personagem1.isNullOrBlank() ||
+                personagem2.isNullOrBlank()
+            ) {
+                statusText?.text =
+                    "Selecione os dois personagens para começar."
+            } else {
+                carregarModelos()
             }
+
         } catch (_: Exception) {
-            statusText?.text = "Não foi possível iniciar a cena 3D."
+            statusText?.text =
+                "Não foi possível iniciar a visualização 3D."
         }
     }
 
-    private fun openCamera(previewView: PreviewView) {
-        val context = context ?: return
+    private fun abrirCamera(previewView: PreviewView) {
 
-        val expected = generation
+        val context = context ?: return
         val owner = viewLifecycleOwner
 
-        startCameraWatchdog(expected)
-
         try {
-            val future = ProcessCameraProvider.getInstance(context)
+
+            val future =
+                ProcessCameraProvider.getInstance(context)
 
             future.addListener({
-                if (
-                    container == null ||
-                    expected != generation ||
-                    mode != Mode.CAMERA
-                ) {
+
+                if (container == null) {
                     return@addListener
                 }
 
                 try {
+
                     val provider = future.get()
 
                     val selector = when {
+
                         provider.hasCamera(
                             CameraSelector.DEFAULT_BACK_CAMERA
                         ) -> CameraSelector.DEFAULT_BACK_CAMERA
@@ -542,7 +469,8 @@ class CameraFragment : Fragment() {
                         ) -> CameraSelector.DEFAULT_FRONT_CAMERA
 
                         else -> {
-                            startPreview(useCamera = false)
+                            statusText?.text =
+                                "Nenhuma câmera disponível."
                             return@addListener
                         }
                     }
@@ -553,18 +481,7 @@ class CameraFragment : Fragment() {
                         previewView.surfaceProvider
                     )
 
-                    cameraProvider = provider
-                    cameraPreview = preview
-
-                    previewView.previewStreamState.observe(owner) { state ->
-                        if (
-                            expected == generation &&
-                            mode == Mode.CAMERA
-                        ) {
-                            cameraStreaming =
-                                state == PreviewView.StreamState.STREAMING
-                        }
-                    }
+                    provider.unbindAll()
 
                     provider.bindToLifecycle(
                         owner,
@@ -572,179 +489,210 @@ class CameraFragment : Fragment() {
                         preview
                     )
 
+                    cameraProvider = provider
+                    cameraPreview = preview
+
                 } catch (_: Exception) {
-                    if (
-                        expected == generation &&
-                        container != null
-                    ) {
-                        startPreview(useCamera = false)
-                    }
+                    statusText?.text =
+                        "Não foi possível abrir a câmera."
                 }
+
             }, ContextCompat.getMainExecutor(context))
 
         } catch (_: Exception) {
-            if (
-                expected == generation &&
-                container != null
-            ) {
-                startPreview(useCamera = false)
-            }
-        }
-    }
-
-    private fun startCameraWatchdog(expected: Int) {
-        cameraWatchdogJob?.cancel()
-
-        cameraWatchdogJob = viewLifecycleOwner.lifecycleScope.launch {
-            var withoutCameraMs = 0L
-            var lastTime = SystemClock.elapsedRealtime()
-
-            while (isActive) {
-                delay(500L)
-
-                if (
-                    container == null ||
-                    expected != generation ||
-                    mode != Mode.CAMERA
-                ) {
-                    return@launch
-                }
-
-                val now = SystemClock.elapsedRealtime()
-                val elapsed = now - lastTime
-                lastTime = now
-
-                val resumed = viewLifecycleOwner.lifecycle
-                    .currentState.isAtLeast(Lifecycle.State.RESUMED)
-
-                if (!resumed || cameraStreaming) {
-                    withoutCameraMs = 0L
-                } else {
-                    withoutCameraMs += elapsed
-                }
-
-                if (withoutCameraMs >= CAMERA_TIMEOUT_MS) {
-                    startPreview(useCamera = false)
-                    return@launch
-                }
-            }
-        }
-    }
-
-    private fun loadModel() {
-        val scene = sceneView ?: return
-        val location = modelLocation(currentModelFile)
-
-        if (location == null) {
             statusText?.text =
-                "Modelo não encontrado: $currentModelFile"
+                "Erro ao inicializar a câmera."
+        }
+    }
+
+    // ---------------------------------------------------------
+    // CARREGAR OS DOIS PERSONAGENS
+    // ---------------------------------------------------------
+
+    private fun carregarModelos() {
+
+        val scene = sceneView ?: return
+
+        val arquivo1 = personagem1
+        val arquivo2 = personagem2
+
+        if (arquivo1.isNullOrBlank() || arquivo2.isNullOrBlank()) {
+            statusText?.text = "Selecione os dois personagens."
+            return
+        }
+
+        if (arquivo1 == arquivo2) {
+            statusText?.text =
+                "Escolha dois personagens diferentes."
+            return
+        }
+
+        val location1 = modelLocation(arquivo1)
+        val location2 = modelLocation(arquivo2)
+
+        if (location1 == null || location2 == null) {
+            statusText?.text =
+                "Não foi possível encontrar os arquivos dos personagens."
 
             placeButton?.isEnabled = false
+            ataqueButton?.isEnabled = false
             return
         }
 
         loadJob?.cancel()
-        removeModel()
 
-        val expected = generation
+        removerModelos()
+
+        val expectedGeneration = generation
         val expectedModel = ++modelGeneration
-        val isAr = mode == Mode.AR
-        val fileName = currentModelFile
 
         placeButton?.isEnabled = false
+        ataqueButton?.isEnabled = false
+
+        statusText?.text = "Carregando personagens 3D..."
 
         loadJob = viewLifecycleOwner.lifecycleScope.launch {
+
             try {
-                val instance =
-                    scene.modelLoader.loadModelInstance(location)
+
+                val instance1 =
+                    scene.modelLoader.loadModelInstance(location1)
+
+                val instance2 =
+                    scene.modelLoader.loadModelInstance(location2)
 
                 if (
-                    expected != generation ||
+                    expectedGeneration != generation ||
                     expectedModel != modelGeneration ||
                     sceneView !== scene
                 ) {
                     return@launch
                 }
 
-                if (instance == null) {
-                    statusText?.text = "Não foi possível abrir o modelo."
+                if (instance1 == null || instance2 == null) {
+                    statusText?.text =
+                        "Não foi possível carregar um dos personagens."
                     return@launch
                 }
 
-                val node = ModelNode(
-                    modelInstance = instance,
-                    scaleToUnits = if (isAr) 0.5f else 1.5f,
+                val node1 = ModelNode(
+                    modelInstance = instance1,
+                    scaleToUnits = 1.2f,
                     centerOrigin = Position(0f, 0f, 0f)
                 )
 
-                node.isEditable = true
-                modelNode = node
+                val node2 = ModelNode(
+                    modelInstance = instance2,
+                    scaleToUnits = 1.2f,
+                    centerOrigin = Position(0f, 0f, 0f)
+                )
 
-                if (!isAr) {
-                    scene.addChildNode(node)
-                    placeButton?.isEnabled = true
-                    statusText?.text =
-                        "Modelo carregado na visualização da câmera."
+                node1.position = Position(-0.65f, 0f, 0f)
+                node2.position = Position(0.65f, 0f, 0f)
+
+                modelNode1 = node1
+                modelNode2 = node2
+
+                modelosVisiveis = false
+
+                placeButton?.apply {
+                    text = "Mostrar personagens"
+                    isEnabled = true
                 }
+
+                statusText?.text =
+                    "Personagens carregados! Toque em Mostrar personagens."
+
+                atualizarInterfaceBatalha(
+                    batalhaViewModel.estado.value
+                        ?: return@launch
+                )
 
             } catch (e: CancellationException) {
                 throw e
+
             } catch (_: Exception) {
+
                 if (
-                    expected == generation &&
+                    expectedGeneration == generation &&
                     expectedModel == modelGeneration
                 ) {
                     statusText?.text =
-                        "Erro ao carregar: $fileName"
+                        "Erro ao carregar os personagens 3D."
                 }
             }
         }
     }
 
-    private fun placeModel() {
-        val ar = arView ?: return
+    // ---------------------------------------------------------
+    // MOSTRAR E CENTRALIZAR OS PERSONAGENS
+    // ---------------------------------------------------------
 
-        if (anchorNode != null) {
-            loadModel()
+    private fun centralizarModelos() {
+
+        val scene = sceneView
+        val node1 = modelNode1
+        val node2 = modelNode2
+
+        if (scene == null || node1 == null || node2 == null) {
+            statusText?.text =
+                "Aguarde o carregamento dos personagens."
             return
         }
 
-        val hit = placementHit ?: return
-        val model = modelNode ?: return
-
         try {
-            val anchor = AnchorNode(
-                engine = ar.engine,
-                anchor = hit.createAnchor()
-            )
 
-            anchor.addChildNode(model)
-            ar.addChildNode(anchor)
+            if (!modelosVisiveis) {
 
-            anchorNode = anchor
-            placementHit = null
+                node1.position = Position(-0.65f, 0f, 0f)
+                node2.position = Position(0.65f, 0f, 0f)
+
+                scene.addChildNode(node1)
+                scene.addChildNode(node2)
+
+                modelosVisiveis = true
+            } else {
+
+                node1.position = Position(-0.65f, 0f, 0f)
+                node2.position = Position(0.65f, 0f, 0f)
+            }
+
+            scene.cameraNode.position = Position(0f, 0f, 3f)
+            scene.cameraNode.lookAt(Position(0f, 0f, 0f))
 
             placeButton?.apply {
-                text = "Reposicionar"
+                text = "Centralizar"
                 isEnabled = true
             }
 
-            statusText?.text = "Objeto posicionado no ambiente."
+            statusText?.text =
+                "Personagens exibidos na tela!"
+
+            batalhaViewModel.estado.value?.let {
+                atualizarInterfaceBatalha(it)
+            }
 
         } catch (_: Exception) {
             statusText?.text =
-                "Não foi possível posicionar. Tente outra superfície."
+                "Não foi possível mostrar os personagens."
         }
     }
 
-    private fun modelLocation(fileName: String): String? {
+    // ---------------------------------------------------------
+    // LOCALIZAR ARQUIVOS DOS MODELOS
+    // ---------------------------------------------------------
+
+    private fun modelLocation(fileName: String?): String? {
+
+        if (fileName.isNullOrBlank()) return null
+
         val context = context ?: return null
 
         try {
             context.assets.open(fileName).use { }
             return fileName
         } catch (_: Exception) {
-            // Procura no armazenamento interno.
+            // Tenta localizar no armazenamento interno.
         }
 
         val file = File(context.filesDir, fileName)
@@ -756,61 +704,56 @@ class CameraFragment : Fragment() {
         }
     }
 
-    private fun removeModel() {
+    // ---------------------------------------------------------
+    // REMOVER MODELOS
+    // ---------------------------------------------------------
+
+    private fun removerModelos() {
+
         val scene = sceneView
 
-        modelNode?.let { model ->
+        modelNode1?.let { model ->
             runCatching {
-                anchorNode?.removeChildNode(model)
                 scene?.removeChildNode(model)
                 model.destroy()
             }
         }
 
-        modelNode = null
-
-        anchorNode?.let { anchor ->
+        modelNode2?.let { model ->
             runCatching {
-                scene?.removeChildNode(anchor)
-                anchor.anchor.detach()
-                anchor.destroy()
+                scene?.removeChildNode(model)
+                model.destroy()
             }
         }
 
-        anchorNode = null
-        placementHit = null
+        modelNode1 = null
+        modelNode2 = null
 
-        if (mode == Mode.AR) {
-            placeButton?.text = "Posicionar"
-        }
+        modelosVisiveis = false
     }
 
+    // ---------------------------------------------------------
+    // LIMPAR CENA
+    // ---------------------------------------------------------
+
     private fun clearScene() {
+
         generation++
         modelGeneration++
-
-        arWatchdogJob?.cancel()
-        arWatchdogJob = null
-
-        cameraWatchdogJob?.cancel()
-        cameraWatchdogJob = null
 
         loadJob?.cancel()
         loadJob = null
 
-        cameraPreview?.let { preview ->
+        cameraProvider?.let {
             runCatching {
-                cameraProvider?.unbind(preview)
+                it.unbindAll()
             }
         }
 
-        cameraPreview = null
         cameraProvider = null
+        cameraPreview = null
 
-        arTracking = false
-        cameraStreaming = false
-
-        removeModel()
+        removerModelos()
 
         sceneView?.let { scene ->
             runCatching {
@@ -820,37 +763,48 @@ class CameraFragment : Fragment() {
         }
 
         sceneView = null
-        arView = null
 
         container?.removeAllViews()
+
+        placeButton?.isEnabled = false
+        ataqueButton?.isEnabled = false
     }
 
-    private fun fullSize() = FrameLayout.LayoutParams(
-        ViewGroup.LayoutParams.MATCH_PARENT,
-        ViewGroup.LayoutParams.MATCH_PARENT
-    )
+    // ---------------------------------------------------------
+    // UTILITÁRIOS
+    // ---------------------------------------------------------
 
-    private fun dp(value: Int): Int {
-        return (value * resources.displayMetrics.density).toInt()
+    private fun fullSize(): FrameLayout.LayoutParams {
+
+        return FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        )
     }
+
+    // ---------------------------------------------------------
+    // ENCERRAR TELA
+    // ---------------------------------------------------------
 
     override fun onDestroyView() {
-        availabilityJob?.cancel()
-        availabilityJob = null
 
         clearScene()
 
-        overlay?.let {
-            (it.parent as? ViewGroup)?.removeView(it)
-        }
-
-        overlay = null
         statusText = null
         placeButton = null
         container = null
 
-        pendingAr = false
-        mode = Mode.CHECKING
+        vidaBar1 = null
+        vidaBar2 = null
+        vidaTexto1 = null
+        vidaTexto2 = null
+        turnoTexto = null
+
+        ataqueButton = null
+        reiniciarButton = null
+        gameOverPanel = null
+        winnerText = null
+        restartGameButton = null
 
         super.onDestroyView()
     }

@@ -1,9 +1,7 @@
 package com.ifpr.androidapptemplatear.ui
 
 import android.graphics.Color
-import android.graphics.Typeface
 import android.os.Bundle
-import android.util.TypedValue
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
@@ -17,9 +15,20 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.navigation.fragment.findNavController
 import com.ifpr.androidapptemplatear.R
 
+
 class ChangeObjectFragment : Fragment() {
 
     private lateinit var sharedViewModel: SharedModelViewModel
+
+    // 1 = escolhendo o primeiro personagem
+    // 2 = escolhendo o segundo personagem
+    private var personagemSelecionado = 1
+
+    private var primeiro: String? = null
+    private var segundo: String? = null
+
+    private var selecaoText: TextView? = null
+    private var iniciarButton: Button? = null
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -39,193 +48,203 @@ class ChangeObjectFragment : Fragment() {
     ) {
         super.onViewCreated(view, savedInstanceState)
 
-        sharedViewModel =
-            ViewModelProvider(requireActivity())[SharedModelViewModel::class.java]
+        sharedViewModel = ViewModelProvider(requireActivity())
+            .get(SharedModelViewModel::class.java)
 
-        carregarModelos()
+        // Recupera as escolhas já feitas
+        primeiro = sharedViewModel.personagem1.value
+        segundo = sharedViewModel.personagem2.value
+
+        // Continua a seleção a partir do personagem que falta
+        personagemSelecionado = if (primeiro.isNullOrBlank()) 1 else 2
+
+        carregarModelos(view)
     }
 
-    /**
-     * Procura automaticamente todos os arquivos .glb
-     * existentes na pasta assets.
-     */
-    private fun carregarModelos() {
+    private fun carregarModelos(view: View) {
 
-        val container =
-            view?.findViewById<LinearLayout>(R.id.categoryContainer)
+        val categoryContainer =
+            view.findViewById<LinearLayout>(R.id.categoryContainer)
 
-        container?.removeAllViews()
+        categoryContainer.removeAllViews()
+
+        val titulo = TextView(requireContext()).apply {
+            text = "ESCOLHA OS PERSONAGENS"
+            textSize = 22f
+            setTextColor(Color.BLACK)
+            gravity = Gravity.CENTER
+            setPadding(12, 24, 12, 24)
+        }
+
+        categoryContainer.addView(titulo)
+
+        selecaoText = TextView(requireContext()).apply {
+            text = textoSelecao()
+            textSize = 17f
+            setTextColor(Color.DKGRAY)
+            gravity = Gravity.CENTER
+            setPadding(12, 12, 12, 20)
+        }
+
+        categoryContainer.addView(selecaoText)
 
         val modelos = requireContext()
             .assets
             .list("")
-            ?.filter { arquivo ->
-                arquivo.endsWith(".glb", ignoreCase = true)
+            ?.filter {
+                it.endsWith(".glb", ignoreCase = true)
             }
             ?.sorted()
             ?: emptyList()
 
         if (modelos.isEmpty()) {
-            Toast.makeText(
-                requireContext(),
-                "Nenhum modelo 3D encontrado.",
-                Toast.LENGTH_LONG
-            ).show()
-
-            return
+            categoryContainer.addView(
+                TextView(requireContext()).apply {
+                    text = "Nenhum arquivo .glb foi encontrado em app/src/main/assets."
+                    setTextColor(Color.RED)
+                    gravity = Gravity.CENTER
+                }
+            )
         }
-
-        adicionarTitulo(container)
 
         modelos.forEach { arquivo ->
-            adicionarModelo(container, arquivo)
-        }
-    }
 
-    /**
-     * Adiciona o título da lista de modelos.
-     */
-    private fun adicionarTitulo(container: LinearLayout?) {
+            val botao = Button(requireContext()).apply {
 
-        val titulo = TextView(requireContext()).apply {
+                text = arquivo
+                    .removeSuffix(".glb")
+                    .replace("_", " ")
+                    .replaceFirstChar { it.uppercase() }
 
-            text = "Modelos 3D"
-
-            setTextSize(
-                TypedValue.COMPLEX_UNIT_SP,
-                20f
-            )
-
-            setTypeface(null, Typeface.BOLD)
-
-            setTextColor(Color.BLACK)
-
-            setPadding(
-                0,
-                24,
-                0,
-                16
-            )
-        }
-
-        container?.addView(titulo)
-    }
-
-    /**
-     * Cria um item da lista para cada modelo encontrado.
-     */
-    private fun adicionarModelo(
-        container: LinearLayout?,
-        arquivo: String
-    ) {
-
-        val itemLayout = LinearLayout(requireContext()).apply {
-
-            orientation = LinearLayout.HORIZONTAL
-
-            gravity = Gravity.CENTER_VERTICAL
-
-            setPadding(
-                0,
-                12,
-                0,
-                12
-            )
-
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-        }
-
-        /*
-         * Remove a extensão .glb e deixa o nome
-         * mais amigável para exibição.
-         *
-         * Exemplo:
-         * pikachu.glb -> Pikachu
-         * cadeira_escolar.glb -> Cadeira escolar
-         */
-        val nomeModelo = arquivo
-            .removeSuffix(".glb")
-            .removeSuffix(".GLB")
-            .replace("_", " ")
-            .replaceFirstChar {
-                if (it.isLowerCase()) {
-                    it.titlecase()
-                } else {
-                    it.toString()
+                setOnClickListener {
+                    selecionarArquivo(arquivo)
                 }
             }
 
-        val nome = TextView(requireContext()).apply {
-
-            text = nomeModelo
-
-            setTextSize(
-                TypedValue.COMPLEX_UNIT_SP,
-                17f
-            )
-
-            setTextColor(Color.DKGRAY)
-
-            layoutParams = LinearLayout.LayoutParams(
-                0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                1f
+            categoryContainer.addView(
+                botao,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
             )
         }
 
-        val botao = Button(requireContext()).apply {
+        iniciarButton = Button(requireContext()).apply {
 
-            text = "Exibir"
+            text = "INICIAR BATALHA"
 
             setOnClickListener {
 
-                /*
-                 * Informa para a tela da câmera
-                 * qual modelo deve ser carregado.
-                 */
-                sharedViewModel.selectModel(arquivo)
+                val p1 = primeiro
+                val p2 = segundo
 
-                /*
-                 * Abre a tela de Realidade Aumentada.
-                 */
+                if (p1.isNullOrBlank() || p2.isNullOrBlank()) {
+                    Toast.makeText(
+                        requireContext(),
+                        "Selecione os dois personagens.",
+                        Toast.LENGTH_SHORT
+                    ).show()
+
+                    return@setOnClickListener
+                }
+
+                if (p1 == p2) {
+                    Toast.makeText(
+                        requireContext(),
+                        "Escolha dois personagens diferentes.",
+                        Toast.LENGTH_SHORT
+                    ).show()
+
+                    return@setOnClickListener
+                }
+
+                // As duas escolhas já estão no SharedModelViewModel.
                 findNavController().navigate(
                     R.id.navigation_camera
                 )
             }
         }
 
-        itemLayout.addView(nome)
-        itemLayout.addView(botao)
+        categoryContainer.addView(iniciarButton)
 
-        container?.addView(itemLayout)
-
-        adicionarDivisor(container)
+        atualizarSelecao()
     }
 
-    /**
-     * Adiciona uma linha separando os modelos.
-     */
-    private fun adicionarDivisor(
-        container: LinearLayout?
-    ) {
+    private fun selecionarArquivo(arquivo: String) {
 
-        val divisor = View(requireContext()).apply {
+        if (personagemSelecionado == 1) {
 
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                1
-            ).apply {
+            primeiro = arquivo
 
-                topMargin = 4
-                bottomMargin = 4
+            sharedViewModel.selecionarPersonagem1(arquivo)
+
+            // Impede que os dois personagens sejam iguais.
+            if (segundo == arquivo) {
+                segundo = null
+                sharedViewModel.selecionarPersonagem2("")
             }
 
-            setBackgroundColor(Color.LTGRAY)
+            personagemSelecionado = 2
+
+        } else {
+
+            if (arquivo == primeiro) {
+                Toast.makeText(
+                    requireContext(),
+                    "Escolha um personagem diferente do primeiro.",
+                    Toast.LENGTH_SHORT
+                ).show()
+
+                return
+            }
+
+            segundo = arquivo
+
+            sharedViewModel.selecionarPersonagem2(arquivo)
         }
 
-        container?.addView(divisor)
+        atualizarSelecao()
+    }
+
+    private fun atualizarSelecao() {
+
+        selecaoText?.text = textoSelecao()
+
+        iniciarButton?.isEnabled =
+            !primeiro.isNullOrBlank() &&
+                    !segundo.isNullOrBlank() &&
+                    primeiro != segundo
+    }
+
+    private fun textoSelecao(): String {
+
+        val etapa = if (personagemSelecionado == 1) {
+            "Agora escolha o primeiro personagem."
+        } else {
+            "Agora escolha o segundo personagem."
+        }
+
+        return "Personagem 1: ${nomePersonagem(primeiro)}\n" +
+                "Personagem 2: ${nomePersonagem(segundo)}\n\n" +
+                etapa
+    }
+
+    private fun nomePersonagem(arquivo: String?): String {
+        if (arquivo.isNullOrBlank()) {
+            return "Não escolhido"
+        }
+
+        return arquivo
+            .removeSuffix(".glb")
+            .replace("_", " ")
+            .replaceFirstChar { it.uppercase() }
+    }
+
+    override fun onDestroyView() {
+        selecaoText = null
+        iniciarButton = null
+
+        super.onDestroyView()
     }
 }
